@@ -1,0 +1,56 @@
+- name: Update the java.security file with Ansible
+  hosts: "{{ host_pattern | default('all') }}"
+  become: true
+  vars:
+    java_base: "/usr/java"
+    jdk_dir: "jdk1.8.0_251"
+
+  tasks:
+
+    # The python code below checks if the jdk.tls.disabledAlgorithms parameter from
+    # the java.security file contains expected options. If any is missing, appends it
+    # to the already configured, default settings and prints the updated value of the
+    # parameter on STDIN. Otherwise, no output is printed.
+    # It would be difficult to achive this functionality using only Ansible modules
+    # like 'ini' or 'ini_file'. The problem is that the value of this parameter is
+    # wrapped in more than one line.
+
+    - name: Verify jdk.tls.disabledAlgorithms in java.security
+      command: "{{ ansible_facts.python.executable }}"
+      args:
+        stdin: |
+          import re
+          from jproperties import Properties
+
+          p=Properties()
+          with open("{{ java_base }}/{{ jdk_dir }}/jre/lib/security/java.security", "rb") as f:
+            p.load(f, "utf-8")
+
+          val=[]
+          try:
+            val=re.split("\s*,\s*", p["jdk.tls.disabledAlgorithms"].data)
+          except KeyError:
+            pass
+
+          for opt in ("TLSv1", "TLSv1.1"):
+            if not opt in val:
+              val.append(opt)
+
+          if ", ".join(val) != p["jdk.tls.disabledAlgorithms"].data:
+            val="jdk.tls.disabledAlgorithms=" + ", ".join(val)
+            val=' \\\n    '.join( line.strip() for line in re.compile('.{1,80}(?:,|$)').findall(val) )
+            print(val)
+
+      register: checkjs
+      changed_when: checkjs.stdout is search ('^jdk.tls.disabledAlgorithms=')
+
+    # If the parameter was updated in the previous step, update java.security.
+    # The problem is that the value of this parameter is wrapped in more than one line.
+
+    - name: Update java.security
+      replace:
+        path: "{{ java_base }}/{{ jdk_dir }}/jre/lib/security/java.security"
+        regexp: '^\s*jdk.tls.disabledAlgorithms\s*=\s*(.*\\\s*\n)*.*(?<!\\)\s*$'
+        replace: "{{ checkjs.stdout }}"
+        backup: yes
+      when: checkjs.changed
